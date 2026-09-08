@@ -17,15 +17,50 @@ A multi-agent orchestration platform where a supervisor agent decomposes complex
 | Review UI | React or Streamlit | Human-in-the-loop interface |
 | Containerization | Docker + docker-compose | Full system orchestration |
 
+## Project Layout
+
+```
+src/agent_orchestrator/
+  schemas.py       # ExecutionPlan, SubTask, SubtaskResult, ReviewResult, EscalationRequest
+  config.py        # env-driven settings: model routing, thresholds, sandbox paths
+  tools/
+    registry.py    # ToolRegistry: rate limits, specialist gating, call logging
+    builtin.py     # web_search, file_read/write, code_execution, db_query, api_call
+  agents/
+    base.py        # BaseAgent: provider routing (OpenAI/Anthropic) + structured output
+    supervisor.py  # task decomposition (create_plan) + final synthesis
+    specialists.py # tool-calling loop per specialist (research/data/writing/code)
+    reviewer.py    # validates aggregated outputs, flags redo/human review
+  graph/
+    state.py       # OrchestratorState (LangGraph state + merge reducers)
+    build.py       # the state machine: plan -> dispatch -> review -> synthesize -> deliver
+  run.py           # CLI entry point
+tests/             # graph smoke tests + unit tests, all using a fake chat model (no API key needed)
+```
+
+Run it locally:
+
+```
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env   # fill in OPENAI_API_KEY / ANTHROPIC_API_KEY
+pytest -q
+python -m agent_orchestrator.run "Research topic X and write a two-paragraph summary"
+```
+
+Note: `human_escalation` in the graph is currently a placeholder — it records an
+`EscalationRequest` on the final state and the graph ends. The real approval
+queue and review UI are built in Phase 3.
+
 ## Build Progress
 
 Tracking checklist for the build guide below. Check items off as they're completed.
 
 ### Phase 1: Agent Architecture (Day 1–4)
-- [ ] Design the agent hierarchy (Supervisor / Specialist / Reviewer as LangGraph nodes with input/output schemas)
-- [ ] Build the task decomposition engine (structured execution plans with dependencies, assigned specialist, expected output format, complexity estimate)
-- [ ] Implement the tool registry (web search, file read/write, sandboxed code execution, DB query, API calls; logged inputs/outputs/latency/success)
-- [ ] Build the LangGraph state machine (intake → planning → execution → review → synthesis → delivery, with retry/reject/escalate conditional edges)
+- [x] Design the agent hierarchy (Supervisor / Specialist / Reviewer as LangGraph nodes with input/output schemas)
+- [x] Build the task decomposition engine (structured execution plans with dependencies, assigned specialist, expected output format, complexity estimate)
+- [x] Implement the tool registry (web search, file read/write, sandboxed code execution, DB query, API calls; logged inputs/outputs/latency/success)
+- [x] Build the LangGraph state machine (intake → planning → execution → review → synthesis → delivery, with retry/reject/escalate conditional edges)
 
 ### Phase 2: Memory System (Day 4–7)
 - [ ] Implement short-term working memory (Redis, scoped to a single task)

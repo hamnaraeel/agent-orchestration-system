@@ -22,6 +22,7 @@ build/
 chroma_data/
 postgres_data/
 redis_data/
+sandbox/
 
 # Logs
 *.log
