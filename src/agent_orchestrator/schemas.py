@@ -36,6 +36,14 @@ class SubTask(BaseModel):
     estimated_complexity: int = Field(
         ge=1, le=5, description="1 = trivial, 5 = very complex."
     )
+    sensitive: bool = Field(
+        default=False,
+        description=(
+            "True if this subtask involves a financial transaction, deleting or "
+            "overwriting data, or sending a communication externally on the user's "
+            "behalf -- anything where a wrong answer would be costly."
+        ),
+    )
 
 
 class ExecutionPlan(BaseModel):
@@ -97,3 +105,20 @@ class EscalationRequest(BaseModel):
     level: EscalationLevel
     reason: str
     context: dict = Field(default_factory=dict)
+
+
+class DecisionAction(str, Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+    MODIFY = "modify"
+    TAKE_OVER = "take_over"
+
+
+class HumanDecision(BaseModel):
+    action: DecisionAction
+    feedback: str | None = Field(
+        default=None, description="Guidance for a 'modify' decision."
+    )
+    output: str | None = Field(
+        default=None, description="The human-provided output for a 'take_over' decision."
+    )

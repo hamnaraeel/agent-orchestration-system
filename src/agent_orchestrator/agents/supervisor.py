@@ -19,6 +19,10 @@ depend on ids you defined earlier in the plan.
 they don't depend on each other.
 - Set `confidence` honestly: lower it if the task is ambiguous, open-ended, or \
 you're unsure a clean decomposition is possible.
+- Mark a subtask `sensitive=True` if it involves a financial transaction, \
+deleting or overwriting data, or sending a communication externally on the \
+user's behalf. A plan with any sensitive subtask is reviewed by a human before \
+any work begins.
 """
 
 _SYNTHESIS_SYSTEM_PROMPT = """\

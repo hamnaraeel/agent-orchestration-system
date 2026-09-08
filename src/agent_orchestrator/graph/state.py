@@ -11,7 +11,7 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, TypedDict
 
-from ..schemas import EscalationRequest, ExecutionPlan, ReviewResult, SubtaskResult
+from ..schemas import EscalationRequest, ExecutionPlan, HumanDecision, ReviewResult, SubtaskResult
 
 
 def _merge_optional_dict(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
@@ -26,14 +26,20 @@ def _merge_optional_dict(left: dict[str, Any], right: dict[str, Any]) -> dict[st
 
 class OrchestratorState(TypedDict, total=False):
     task: str
+    user_id: str
+    task_id: str
     memory_context: str
+    require_human_approval: bool
     plan: ExecutionPlan | None
     completed: Annotated[dict[str, SubtaskResult], _merge_optional_dict]
     retry_counts: Annotated[dict[str, int], _merge_optional_dict]
+    subtask_feedback: Annotated[dict[str, str], _merge_optional_dict]
     review: ReviewResult | None
     review_cycles: int
     status: str
     escalation: EscalationRequest | None
+    escalation_source: str | None
+    human_decision: HumanDecision | None
     final_output: str | None
     errors: Annotated[list[str], operator.add]
 

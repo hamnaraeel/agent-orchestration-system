@@ -33,24 +33,80 @@ src/agent_orchestrator/
     reviewer.py    # validates aggregated outputs, flags redo/human review
   graph/
     state.py       # OrchestratorState (LangGraph state + merge reducers)
-    build.py       # the state machine: plan -> dispatch -> review -> synthesize -> deliver
-  run.py           # CLI entry point
+    build.py       # the state machine: intake -> plan -> dispatch -> review -> synthesize -> deliver
+  memory/
+    models.py      # MemoryRecord, ExtractedMemory
+    working.py     # WorkingMemory: Redis hash per task_id, cleared on completion
+    long_term.py   # LongTermMemory: ChromaDB collection, importance/consolidation/expiration
+    extractor.py   # MemoryExtractorAgent: LLM extraction of approach/facts/preferences
+  human_loop/
+    models.py          # PendingApproval, ApprovalStatus, ChatMessage
+    approval_queue.py  # ApprovalQueue: Redis-backed queue a runner submits to and blocks on
+  api.py           # FastAPI: memory dashboard + approval-queue endpoints (list/get/decide/ask)
+  run.py           # CLI entry point + `run_task`: the runner that bridges graph interrupts to the queue
+ui/
+  memory_dashboard.py  # Streamlit page over long-term memory (per-user view + delete)
+  review_queue.py      # Streamlit review interface: context, clarifying-question chat, decide
 tests/             # graph smoke tests + unit tests, all using a fake chat model (no API key needed)
 ```
 
 Run it locally:
 
 ```
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # requires Python 3.11 or 3.12 -- see note below
 pip install -e ".[dev]"
 cp .env.example .env   # fill in OPENAI_API_KEY / ANTHROPIC_API_KEY
 pytest -q
-python -m agent_orchestrator.run "Research topic X and write a two-paragraph summary"
+python -m agent_orchestrator.run "Research topic X and write a two-paragraph summary" --user-id alice
+
+# memory dashboard + approval-queue API
+uvicorn agent_orchestrator.api:app --reload
+streamlit run ui/memory_dashboard.py
+streamlit run ui/review_queue.py
 ```
 
-Note: `human_escalation` in the graph is currently a placeholder — it records an
-`EscalationRequest` on the final state and the graph ends. The real approval
-queue and review UI are built in Phase 3.
+Notes:
+- **Python version**: ChromaDB depends on `onnxruntime`, which does not yet ship
+  wheels for Python 3.13 on all platforms. Use Python 3.11 or 3.12 for this
+  project (`pyproject.toml` pins `requires-python` accordingly).
+- **Redis**: short-term working memory *and* the human approval queue need a
+  reachable Redis (`REDIS_URL`, default `redis://localhost:6379/0`). Quickest
+  local option: `docker run -p 6379:6379 redis`. Long-term memory (ChromaDB)
+  persists to a local directory and needs no server.
+- **First ChromaDB run**: unless you inject a custom embedding function,
+  ChromaDB downloads a small (~80MB) ONNX embedding model on first use and
+  caches it — that first call needs network access.
+- Run with `--no-memory` to skip Redis and ChromaDB entirely; escalations are
+  then prompted for directly on the terminal instead of going through the
+  approval queue.
+- Run with `--require-approval` to force a human to review the plan (`APPROVE_PLAN`)
+  before any specialist work begins, regardless of confidence.
+
+### How escalation works
+
+`human_escalation` calls LangGraph's `interrupt()`, which durably suspends the
+graph (via a checkpointer) until resumed with `Command(resume=decision)`. The
+graph has no idea a queue exists -- `run_task` in `run.py` is the runner that
+bridges an interrupt to a Redis-backed `ApprovalQueue`: it submits the paused
+context and blocks on `wait_for_decision`, which is exactly what a human
+resolving it through the review API/UI (in a *separate* process) unblocks.
+
+| Trigger | Level | Meaning |
+|---|---|---|
+| Plan confidence below threshold | `APPROVE_PLAN` | Review the plan before any work begins |
+| Plan contains a sensitive subtask (financial, data-destructive, external comms) | `APPROVE_PLAN` | Same, flagged by the supervisor at planning time |
+| `--require-approval` passed | `APPROVE_PLAN` | Explicit user request |
+| Reviewer flags a deliverable as sensitive/risky | `APPROVE_ACTION` | Confirm before delivering |
+| Reviewer never approves after `max_review_cycles` | `TAKE_OVER` | System is stuck, human should just finish it |
+| A specialist fails the same subtask past `max_specialist_retries` | `TAKE_OVER` | Same, for one subtask |
+| Reviewer approves but the score is still below `review_score_threshold` | `NOTIFY` | Non-blocking -- logged, execution proceeds automatically |
+
+The level is a severity hint for the UI, not a restriction: whichever level
+fires, a human resolving a blocking escalation always chooses one of
+**approve** / **reject** / **modify** (with feedback) / **take over** (with
+their own output). `reject` always stops the task; `take_over` either
+supplies that one stuck subtask's output (execution continues) or the whole
+task's final output (execution ends), depending on where the escalation fired.
 
 ## Build Progress
 
@@ -63,16 +119,16 @@ Tracking checklist for the build guide below. Check items off as they're complet
 - [x] Build the LangGraph state machine (intake → planning → execution → review → synthesis → delivery, with retry/reject/escalate conditional edges)
 
 ### Phase 2: Memory System (Day 4–7)
-- [ ] Implement short-term working memory (Redis, scoped to a single task)
-- [ ] Build long-term semantic memory (ChromaDB embeddings of tasks, approaches, tools used, facts, preferences)
-- [ ] Implement memory retrieval for planning (inject similar past tasks/approaches/preferences into planning prompt)
-- [ ] Add memory management (importance scoring, consolidation, expiration, dashboard, delete endpoint)
+- [x] Implement short-term working memory (Redis, scoped to a single task)
+- [x] Build long-term semantic memory (ChromaDB embeddings of tasks, approaches, tools used, facts, preferences)
+- [x] Implement memory retrieval for planning (inject similar past tasks/approaches/preferences into planning prompt)
+- [x] Add memory management (importance scoring, consolidation, expiration, dashboard, delete endpoint)
 
 ### Phase 3: Human-in-the-Loop System (Day 7–10)
-- [ ] Define escalation triggers (low confidence, repeated specialist failure, sensitive ops, low review score, explicit user request)
-- [ ] Build the approval queue (pause execution, package context, push to review queue, notify reviewer, wait for decision)
-- [ ] Implement granular approval levels (Notify / Approve action / Approve plan / Take over)
-- [ ] Build the review interface (task context, decision point, proposed action + reasoning, relevant memories, action buttons, clarifying-question chat)
+- [x] Define escalation triggers (low confidence, repeated specialist failure, sensitive ops, low review score, explicit user request)
+- [x] Build the approval queue (pause execution, package context, push to review queue, notify reviewer, wait for decision)
+- [x] Implement granular approval levels (Notify / Approve action / Approve plan / Take over)
+- [x] Build the review interface (task context, decision point, proposed action + reasoning, relevant memories, action buttons, clarifying-question chat)
 
 ### Phase 4: Observability and Debugging (Day 10–12)
 - [ ] Implement full execution tracing (OpenTelemetry spans for planning, tool calls, review, memory retrieval, escalation)

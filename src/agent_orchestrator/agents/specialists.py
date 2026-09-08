@@ -71,7 +71,12 @@ class SpecialistAgent(BaseAgent):
             )
         return tools
 
-    def run(self, subtask: SubTask, context: dict[str, SubtaskResult]) -> SubtaskResult:
+    def run(
+        self,
+        subtask: SubTask,
+        context: dict[str, SubtaskResult],
+        feedback: str | None = None,
+    ) -> SubtaskResult:
         dependency_context = "\n".join(
             f"[{sid}] {result.output}"
             for sid, result in context.items()
@@ -84,6 +89,11 @@ class SpecialistAgent(BaseAgent):
         )
         if dependency_context:
             prompt += f"\nOutputs from dependency subtasks:\n{dependency_context}"
+        if feedback:
+            prompt += (
+                f"\n\nThis is a retry. Feedback on the previous attempt:\n{feedback}\n"
+                "Address this feedback in your new attempt."
+            )
 
         messages: list = [SystemMessage(content=self.system_prompt), HumanMessage(content=prompt)]
         tool_calls_made: list[ToolCallLog] = []

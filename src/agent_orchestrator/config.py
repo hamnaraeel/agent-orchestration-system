@@ -25,5 +25,18 @@ class Settings(BaseSettings):
     sandbox_workdir: str = "./sandbox"
     code_execution_timeout_seconds: int = 10
 
+    # Short-term working memory (Redis), scoped to a single task run.
+    redis_url: str = "redis://localhost:6379/0"
+    working_memory_ttl_seconds: int = 3600
+
+    # Long-term semantic memory (ChromaDB).
+    chroma_persist_dir: str = "./chroma_data"
+    memory_collection_name: str = "task_memories"
+    memory_top_k: int = 3
+    memory_importance_half_life_days: float = 30.0
+    memory_min_importance: float = 0.05
+    memory_min_age_days_before_expiry: float = 7.0
+    memory_consolidation_similarity_threshold: float = 0.93
+
 
 settings = Settings()
