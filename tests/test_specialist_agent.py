@@ -90,3 +90,39 @@ def test_specialist_captures_tool_failure_as_unsuccessful_result(tmp_path, monke
 
     assert result.success is True  # the agent recovers and still answers
     assert result.tool_calls[0].success is False
+
+
+def test_specialist_accumulates_token_usage_across_the_tool_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr(config.settings, "sandbox_workdir", str(tmp_path))
+
+    registry = ToolRegistry()
+    register_builtin_tools(registry)
+
+    fake_llm = FakeChatModel(
+        structured_response=SpecialistOutput(output="done", confidence=0.9),
+        tool_call_turns=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "file_write", "args": {"path": "n.txt", "content": "x"}, "id": "c1"}
+                ],
+            ),
+            AIMessage(content="done", tool_calls=[]),
+        ],
+        usage={"input_tokens": 10, "output_tokens": 5},
+    )
+
+    agent = SpecialistAgent(SpecialistType.CODE_EXECUTION, "gpt-5", registry, llm=fake_llm)
+    subtask = SubTask(
+        id="st-1",
+        description="Write to n.txt",
+        specialist=SpecialistType.CODE_EXECUTION,
+        expected_output_format="confirmation",
+        estimated_complexity=1,
+    )
+
+    agent.run(subtask, context={})
+
+    # two tool-loop turns + the final structured call = 3 calls, each (10, 5)
+    assert agent.last_usage.input_tokens == 30
+    assert agent.last_usage.output_tokens == 15

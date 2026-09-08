@@ -30,21 +30,18 @@ decisions are available.
 """
 from __future__ import annotations
 
+import time
 import uuid
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Send, interrupt
 
-from .. import schemas
 from ..agents.reviewer import ReviewerAgent
 from ..agents.specialists import SpecialistAgent
 from ..agents.supervisor import SupervisorAgent
 from ..config import settings
-from ..memory import models as memory_models
 from ..memory.extractor import MemoryExtractorAgent
 from ..memory.long_term import LongTermMemory
 from ..memory.models import MemoryRecord
@@ -57,30 +54,45 @@ from ..schemas import (
     SpecialistType,
     SubtaskResult,
 )
+from .checkpointing import default_checkpointer
 from .state import OrchestratorState
 
 _PLAN_SOURCES = {"plan_low_confidence", "plan_sensitive", "plan_requested"}
 
 
-def _msgpack_allowlist_for(*modules) -> list[tuple[str, str]]:
-    """Every class defined in `modules`, as (module, name) pairs -- lets the
-    checkpointer's msgpack serializer round-trip our schema/memory types
-    without the "unregistered type" deprecation warning (and without falling
-    back to pickle, which `LANGGRAPH_STRICT_MSGPACK=true` would otherwise
-    block for anything not on this list)."""
+def _usage_entry(node_name: str, agent) -> list[dict]:
+    """The token usage an agent recorded on its most recent call, as a single-
+    entry list ready to append to `trace_events[-1]["usage"]` -- a list so a
+    caller can always `+=` it in without a None check."""
+    if agent.last_usage is None:
+        return []
     return [
-        (module.__name__, name)
-        for module in modules
-        for name, obj in vars(module).items()
-        if isinstance(obj, type) and obj.__module__ == module.__name__
+        {
+            "node": node_name,
+            "model": agent.model_name,
+            "input_tokens": agent.last_usage.input_tokens,
+            "output_tokens": agent.last_usage.output_tokens,
+        }
     ]
 
 
-def _default_checkpointer() -> MemorySaver:
-    serde = JsonPlusSerializer(
-        allowed_msgpack_modules=_msgpack_allowlist_for(schemas, memory_models)
-    )
-    return MemorySaver(serde=serde)
+def _trace_event(
+    node: str,
+    agent: str,
+    status: str,
+    started_at: float,
+    attributes: dict | None = None,
+    usage: list[dict] | None = None,
+) -> dict:
+    return {
+        "node": node,
+        "agent": agent,
+        "status": status,
+        "started_at": started_at,
+        "ended_at": time.time(),
+        "attributes": attributes or {},
+        "usage": usage or [],
+    }
 
 
 def _format_memories(memories: list[MemoryRecord]) -> str:
@@ -103,8 +115,10 @@ def build_graph(
     long_term_memory: LongTermMemory | None = None,
     memory_extractor: MemoryExtractorAgent | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
+    use_celery: bool = False,
 ) -> CompiledStateGraph:
     def intake(state: OrchestratorState) -> dict:
+        start = time.time()
         # A caller that wants to correlate its own thread_id (for resuming an
         # interrupted run) with working memory / the approval queue can pass
         # task_id in the initial state; otherwise one is generated here.
@@ -112,8 +126,10 @@ def build_graph(
         user_id = state.get("user_id") or "anonymous"
         memory_context = state.get("memory_context", "")
 
+        memory_hits = 0
         if long_term_memory is not None:
             memories = long_term_memory.query(state["task"], user_id=user_id)
+            memory_hits = len(memories)
             if memories:
                 memory_context = _format_memories(memories)
 
@@ -121,13 +137,43 @@ def build_graph(
             working_memory.save(task_id, "task", state["task"])
             working_memory.save(task_id, "user_id", user_id)
 
-        return {"task_id": task_id, "user_id": user_id, "memory_context": memory_context}
+        return {
+            "task_id": task_id,
+            "user_id": user_id,
+            "memory_context": memory_context,
+            "trace_events": [
+                _trace_event(
+                    "intake", "system", "success", start,
+                    attributes={"memory_hits": memory_hits},
+                )
+            ],
+        }
 
     def plan_task(state: OrchestratorState) -> dict:
+        start = time.time()
         plan = supervisor.create_plan(state["task"], state.get("memory_context", ""))
         if working_memory is not None and state.get("task_id"):
             working_memory.save(state["task_id"], "plan", plan.model_dump())
-        return {"plan": plan, "completed": {}, "retry_counts": {}, "review_cycles": 0}
+        return {
+            "plan": plan,
+            "completed": {},
+            "retry_counts": {},
+            "review_cycles": 0,
+            "trace_events": [
+                _trace_event(
+                    "plan_task", "supervisor", "success", start,
+                    attributes={
+                        "confidence": plan.confidence,
+                        "subtask_count": len(plan.subtasks),
+                        "reasoning": plan.reasoning,
+                        "sensitive": any(st.sensitive for st in plan.subtasks),
+                        "prompt": supervisor.last_prompt,
+                        "response": supervisor.last_response_text,
+                    },
+                    usage=_usage_entry("plan_task", supervisor),
+                )
+            ],
+        }
 
     def route_after_plan(state: OrchestratorState) -> str:
         plan = state["plan"]
@@ -190,12 +236,42 @@ def build_graph(
         return "review"
 
     def run_specialist(state: OrchestratorState) -> dict:
+        start = time.time()
         subtask_id = state["subtask_id"]
         plan = state["plan"]
         subtask = next(st for st in plan.subtasks if st.id == subtask_id)
         completed = state.get("completed", {})
         feedback = state.get("subtask_feedback", {}).get(subtask_id)
-        result = specialists[subtask.specialist].run(subtask, completed, feedback=feedback)
+        specialist = specialists[subtask.specialist]
+
+        if use_celery:
+            from ..tasks import run_specialist_task
+
+            payload = run_specialist_task.delay(
+                subtask.specialist.value,
+                specialist.model_name,
+                subtask.model_dump(),
+                {sid: r.model_dump() for sid, r in completed.items()},
+                feedback,
+            ).get(timeout=180)
+            result = SubtaskResult.model_validate(payload["subtask_result"])
+            prompt, response = payload["prompt"], payload["response"]
+            usage_list = (
+                [
+                    {
+                        "node": f"run_specialist:{subtask_id}",
+                        "model": payload["model"],
+                        **payload["usage"],
+                    }
+                ]
+                if payload["usage"]
+                else []
+            )
+        else:
+            result = specialist.run(subtask, completed, feedback=feedback)
+            prompt, response = specialist.last_prompt, specialist.last_response_text
+            usage_list = _usage_entry(f"run_specialist:{subtask_id}", specialist)
+
         retry_counts = state.get("retry_counts", {})
         next_retry_count = retry_counts.get(subtask_id, 0) + (0 if result.success else 1)
         if working_memory is not None and state.get("task_id"):
@@ -203,14 +279,55 @@ def build_graph(
         return {
             "completed": {subtask_id: result},
             "retry_counts": {subtask_id: next_retry_count},
+            "trace_events": [
+                _trace_event(
+                    f"run_specialist:{subtask_id}",
+                    subtask.specialist.value,
+                    "success" if result.success else "failure",
+                    start,
+                    attributes={
+                        "subtask_id": subtask_id,
+                        "output": result.output,
+                        "error": result.error,
+                        "retried_with_feedback": feedback is not None,
+                        "tool_calls": [c.model_dump() for c in result.tool_calls],
+                        "prompt": prompt,
+                        "response": response,
+                        "executed_via": "celery" if use_celery else "in_process",
+                    },
+                    usage=usage_list,
+                )
+            ],
         }
 
     def review(state: OrchestratorState) -> dict:
+        start = time.time()
         result = reviewer.review(state["task"], state["completed"])
         review_cycles = state.get("review_cycles", 0) + 1
         if working_memory is not None and state.get("task_id"):
             working_memory.save(state["task_id"], f"review:{review_cycles}", result.model_dump())
-        return {"review": result, "review_cycles": review_cycles}
+        return {
+            "review": result,
+            "review_cycles": review_cycles,
+            "trace_events": [
+                _trace_event(
+                    "review",
+                    "reviewer",
+                    "success" if result.approved else "warning",
+                    start,
+                    attributes={
+                        "score": result.score,
+                        "approved": result.approved,
+                        "feedback": result.feedback,
+                        "subtasks_to_redo": result.subtasks_to_redo,
+                        "requires_human_review": result.requires_human_review,
+                        "prompt": reviewer.last_prompt,
+                        "response": reviewer.last_response_text,
+                    },
+                    usage=_usage_entry("review", reviewer),
+                )
+            ],
+        }
 
     def route_after_review(state: OrchestratorState) -> str:
         review_result = state["review"]
@@ -225,6 +342,7 @@ def build_graph(
         return "apply_review_feedback"
 
     def apply_review_feedback(state: OrchestratorState) -> dict:
+        start = time.time()
         # Deleting these entries (via the None sentinel) puts them back in the
         # "pending" pool so decide_next_batch re-dispatches them, this time
         # with the reviewer's feedback attached.
@@ -232,9 +350,16 @@ def build_graph(
         return {
             "completed": {sid: None for sid in redo_ids},
             "subtask_feedback": {sid: state["review"].feedback for sid in redo_ids},
+            "trace_events": [
+                _trace_event(
+                    "apply_review_feedback", "system", "warning", start,
+                    attributes={"redo_ids": redo_ids},
+                )
+            ],
         }
 
     def notify_human(state: OrchestratorState) -> dict:
+        start = time.time()
         review_result = state["review"]
         escalation = EscalationRequest(
             level=EscalationLevel.NOTIFY,
@@ -246,15 +371,39 @@ def build_graph(
         )
         if working_memory is not None and state.get("task_id"):
             working_memory.save(state["task_id"], "notification", escalation.model_dump())
-        return {"escalation": escalation, "escalation_source": "review_low_score_notify"}
+        return {
+            "escalation": escalation,
+            "escalation_source": "review_low_score_notify",
+            "trace_events": [
+                _trace_event(
+                    "notify_human", "system", "warning", start,
+                    attributes={"reason": escalation.reason},
+                )
+            ],
+        }
 
     def synthesize(state: OrchestratorState) -> dict:
+        start = time.time()
         final_output = supervisor.synthesize(state["task"], state["completed"])
         if working_memory is not None and state.get("task_id"):
             working_memory.save(state["task_id"], "final_output", final_output)
-        return {"final_output": final_output}
+        return {
+            "final_output": final_output,
+            "trace_events": [
+                _trace_event(
+                    "synthesize", "supervisor", "success", start,
+                    attributes={
+                        "final_output_preview": final_output[:200],
+                        "prompt": supervisor.last_prompt,
+                        "response": supervisor.last_response_text,
+                    },
+                    usage=_usage_entry("synthesize", supervisor),
+                )
+            ],
+        }
 
     def deliver(state: OrchestratorState) -> dict:
+        start = time.time()
         if long_term_memory is not None and memory_extractor is not None:
             record = memory_extractor.extract(
                 state.get("user_id", "anonymous"),
@@ -266,14 +415,27 @@ def build_graph(
             long_term_memory.add(record)
         if working_memory is not None and state.get("task_id"):
             working_memory.clear(state["task_id"])
-        return {"status": "completed"}
+        return {
+            "status": "completed",
+            "trace_events": [_trace_event("deliver", "system", "success", start)],
+        }
 
     def reject_task(state: OrchestratorState) -> dict:
+        start = time.time()
         if working_memory is not None and state.get("task_id"):
             working_memory.clear(state["task_id"])
-        return {"status": "rejected"}
+        return {
+            "status": "rejected",
+            "trace_events": [_trace_event("reject_task", "system", "failure", start)],
+        }
 
     def human_escalation(state: OrchestratorState) -> dict:
+        # Note on timing: this function re-runs from the top on resume (that's
+        # how `interrupt()` replay works), so `start` here reflects when the
+        # resume was processed, not when the pause began -- the real human
+        # wait time is tracked separately, from the approval queue's own
+        # created_at/resolved_at timestamps (see tracing/recorder.py).
+        start = time.time()
         completed = state.get("completed", {})
         review_result = state.get("review")
         stuck_ids: list[str] = []
@@ -352,9 +514,25 @@ def build_graph(
         )
         decision = HumanDecision.model_validate(decision_payload)
 
-        return {"escalation": escalation, "escalation_source": source, "human_decision": decision}
+        return {
+            "escalation": escalation,
+            "escalation_source": source,
+            "human_decision": decision,
+            "trace_events": [
+                _trace_event(
+                    "human_escalation", "human", "escalated", start,
+                    attributes={
+                        "level": escalation.level.value,
+                        "reason": escalation.reason,
+                        "source": source,
+                        "decision": decision.action.value,
+                    },
+                )
+            ],
+        }
 
     def apply_human_decision(state: OrchestratorState) -> dict:
+        start = time.time()
         decision = state["human_decision"]
         source = state["escalation_source"]
         escalation = state["escalation"]
@@ -398,6 +576,17 @@ def build_graph(
             updates["completed"] = {sid: None for sid in stuck_ids}
             updates["retry_counts"] = {sid: 0 for sid in stuck_ids}
 
+        updates["trace_events"] = [
+            _trace_event(
+                "apply_human_decision", "human", "success", start,
+                attributes={
+                    "action": decision.action.value,
+                    "source": source,
+                    "feedback": decision.feedback,
+                    "output": decision.output,
+                },
+            )
+        ]
         return updates
 
     def route_after_decision(state: OrchestratorState) -> str:
@@ -460,4 +649,4 @@ def build_graph(
         ["route_batch", "plan_task", "apply_review_feedback", "synthesize", "deliver", "reject_task"],
     )
 
-    return graph.compile(checkpointer=checkpointer or _default_checkpointer())
+    return graph.compile(checkpointer=checkpointer or default_checkpointer())

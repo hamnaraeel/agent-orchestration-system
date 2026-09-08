@@ -17,6 +17,12 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "streamlit>=1.40",
+    "langgraph-checkpoint-sqlite>=2.0",
+    "langgraph-checkpoint-postgres>=2.0",
+    "psycopg[binary]>=3.2",
+    "celery>=5.4",
+    "opentelemetry-sdk>=1.28",
+    "opentelemetry-exporter-otlp-proto-http>=1.28",
 ]
 
 [project.optional-dependencies]

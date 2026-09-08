@@ -56,6 +56,15 @@ class ExecutionPlan(BaseModel):
     reasoning: str = Field(description="Why the task was decomposed this way.")
 
 
+class TokenUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
 class ToolCallLog(BaseModel):
     tool_name: str
     inputs: dict

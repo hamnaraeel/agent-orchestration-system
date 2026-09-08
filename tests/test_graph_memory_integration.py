@@ -163,8 +163,8 @@ def test_memory_context_is_retrieved_and_injected_before_planning(tmp_path):
     )
     original_invoke = supervisor_llm.with_structured_output
 
-    def spying_with_structured_output(schema):
-        wrapper = original_invoke(schema)
+    def spying_with_structured_output(schema, include_raw: bool = False):
+        wrapper = original_invoke(schema, include_raw=include_raw)
         original_wrapper_invoke = wrapper.invoke
 
         def spying_invoke(messages):

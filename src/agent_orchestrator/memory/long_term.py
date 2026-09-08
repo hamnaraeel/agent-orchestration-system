@@ -34,9 +34,18 @@ class LongTermMemory:
     ) -> None:
         import chromadb
 
-        self._client = chromadb.PersistentClient(
-            path=persist_directory or settings.chroma_persist_dir
-        )
+        # An explicit persist_directory (tests, or a caller that wants local
+        # mode regardless of global config) always wins; otherwise follow
+        # settings.chroma_mode ("http" talks to a Chroma server container --
+        # see docker-compose.yml -- "persistent" writes to a local directory).
+        if persist_directory is None and settings.chroma_mode == "http":
+            self._client = chromadb.HttpClient(
+                host=settings.chroma_host, port=settings.chroma_port
+            )
+        else:
+            self._client = chromadb.PersistentClient(
+                path=persist_directory or settings.chroma_persist_dir
+            )
         collection_kwargs: dict = {"metadata": {"hnsw:space": "cosine"}}
         if embedding_function is not None:
             collection_kwargs["embedding_function"] = embedding_function

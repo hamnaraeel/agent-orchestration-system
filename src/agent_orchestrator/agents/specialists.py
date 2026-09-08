@@ -7,7 +7,14 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 
-from ..schemas import SpecialistOutput, SpecialistType, SubTask, SubtaskResult, ToolCallLog
+from ..schemas import (
+    SpecialistOutput,
+    SpecialistType,
+    SubTask,
+    SubtaskResult,
+    TokenUsage,
+    ToolCallLog,
+)
 from ..tools.registry import ToolRegistry
 from .base import BaseAgent, get_llm
 
@@ -94,9 +101,19 @@ class SpecialistAgent(BaseAgent):
                 f"\n\nThis is a retry. Feedback on the previous attempt:\n{feedback}\n"
                 "Address this feedback in your new attempt."
             )
+        self.last_prompt = prompt
 
         messages: list = [SystemMessage(content=self.system_prompt), HumanMessage(content=prompt)]
         tool_calls_made: list[ToolCallLog] = []
+        total_usage = TokenUsage()
+
+        def _accumulate() -> None:
+            nonlocal total_usage
+            if self.last_usage is not None:
+                total_usage = TokenUsage(
+                    input_tokens=total_usage.input_tokens + self.last_usage.input_tokens,
+                    output_tokens=total_usage.output_tokens + self.last_usage.output_tokens,
+                )
 
         try:
             llm_with_tools = (
@@ -104,6 +121,8 @@ class SpecialistAgent(BaseAgent):
             )
             for _ in range(_MAX_TOOL_ITERATIONS):
                 ai_message: AIMessage = llm_with_tools.invoke(messages)
+                self._record_usage(ai_message)
+                _accumulate()
                 messages.append(ai_message)
                 if not getattr(ai_message, "tool_calls", None):
                     break
@@ -123,16 +142,24 @@ class SpecialistAgent(BaseAgent):
                     f"Exceeded {_MAX_TOOL_ITERATIONS} tool-calling iterations without a final answer."
                 )
 
-            final = self.llm.with_structured_output(SpecialistOutput).invoke(messages)
+            final = self.llm.with_structured_output(SpecialistOutput, include_raw=True).invoke(
+                messages
+            )
+            self._record_usage(final["raw"])
+            _accumulate()
+            self.last_usage = total_usage
+            parsed = final["parsed"]
+            self.last_response_text = parsed.output
             return SubtaskResult(
                 subtask_id=subtask.id,
                 specialist=self.specialist_type,
                 success=True,
-                output=final.output,
-                confidence=final.confidence,
+                output=parsed.output,
+                confidence=parsed.confidence,
                 tool_calls=tool_calls_made,
             )
         except Exception as exc:  # noqa: BLE001 - specialist failures are routed, not raised
+            self.last_usage = total_usage
             return SubtaskResult(
                 subtask_id=subtask.id,
                 specialist=self.specialist_type,

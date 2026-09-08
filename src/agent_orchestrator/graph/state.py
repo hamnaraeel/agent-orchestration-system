@@ -42,6 +42,10 @@ class OrchestratorState(TypedDict, total=False):
     human_decision: HumanDecision | None
     final_output: str | None
     errors: Annotated[list[str], operator.add]
+    # One entry per completed node (see graph/build.py's `_trace_event`), used
+    # by the tracing recorder to persist spans and compute cost/latency --
+    # never touched by the nodes' own business logic.
+    trace_events: Annotated[list[dict], operator.add]
 
     # Only present in the per-branch state handed to `run_specialist` via Send.
     subtask_id: str

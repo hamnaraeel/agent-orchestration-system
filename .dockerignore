@@ -1,0 +1,12 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+*.egg-info/
+chroma_data/
+sandbox/
+*.db
+.env
+.pytest_cache/
+node_modules/
+.DS_Store

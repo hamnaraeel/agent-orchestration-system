@@ -1,0 +1,93 @@
+x-app-image: &app-image
+  build: .
+  env_file:
+    - .env
+  environment: &app-env
+    REDIS_URL: redis://redis:6379/0
+    POSTGRES_URL: postgresql://orchestrator:orchestrator@postgres:5432/orchestrator
+    CHROMA_MODE: http
+    CHROMA_HOST: chroma
+    CHROMA_PORT: "8000"
+    TRACE_DB_PATH: /data/traces.db
+    CHECKPOINT_DB_PATH: /data/checkpoints.db
+    SANDBOX_WORKDIR: /data/sandbox
+    USE_CELERY_FOR_SPECIALISTS: "true"
+  volumes:
+    - app_data:/data
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    chroma:
+      condition: service_started
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+      POSTGRES_DB: orchestrator
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  chroma:
+    image: chromadb/chroma:latest
+    ports: ["8000:8000"]
+    volumes:
+      - chroma_data:/chroma/chroma
+
+  api:
+    <<: *app-image
+    command: uvicorn agent_orchestrator.api:app --host 0.0.0.0 --port 8080
+    ports: ["8080:8080"]
+
+  worker:
+    <<: *app-image
+    command: celery -A agent_orchestrator.tasks worker --loglevel=info
+
+  trace-ui:
+    <<: *app-image
+    command: streamlit run ui/trace_explorer.py --server.address 0.0.0.0 --server.port 8501
+    ports: ["8501:8501"]
+
+  review-ui:
+    <<: *app-image
+    command: streamlit run ui/review_queue.py --server.address 0.0.0.0 --server.port 8502
+    ports: ["8502:8502"]
+
+  memory-ui:
+    <<: *app-image
+    command: streamlit run ui/memory_dashboard.py --server.address 0.0.0.0 --server.port 8503
+    ports: ["8503:8503"]
+
+  replay-ui:
+    <<: *app-image
+    command: streamlit run ui/replay.py --server.address 0.0.0.0 --server.port 8504
+    ports: ["8504:8504"]
+
+  demo:
+    <<: *app-image
+    command: python demo.py
+    profiles: ["demo"]
+
+volumes:
+  postgres_data:
+  chroma_data:
+  app_data:

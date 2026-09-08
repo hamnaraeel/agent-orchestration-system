@@ -42,12 +42,23 @@ src/agent_orchestrator/
   human_loop/
     models.py          # PendingApproval, ApprovalStatus, ChatMessage
     approval_queue.py  # ApprovalQueue: Redis-backed queue a runner submits to and blocks on
-  api.py           # FastAPI: memory dashboard + approval-queue endpoints (list/get/decide/ask)
-  run.py           # CLI entry point + `run_task`: the runner that bridges graph interrupts to the queue
+  tracing/
+    store.py       # TraceStore: SQLite tasks+spans, cost/agent/tool/escalation aggregates
+    otel.py        # OpenTelemetry TracerProvider (console + optional OTLP export)
+    pricing.py     # token counts -> $ cost, from settings.model_pricing
+    recorder.py    # run_traced_task: drives the graph, persists spans, emits OTel spans
+    replay.py      # time-travel: list_checkpoints / replay_from_checkpoint (fork + resume)
+  api.py           # FastAPI: memory + approval-queue + trace/cost + replay endpoints
+  run.py           # CLI entry point + `run_task`/`run_traced_task`: bridges interrupts to the queue
+  tasks.py         # Celery task: reconstructs + runs one specialist in a worker process
 ui/
   memory_dashboard.py  # Streamlit page over long-term memory (per-user view + delete)
   review_queue.py      # Streamlit review interface: context, clarifying-question chat, decide
-tests/             # graph smoke tests + unit tests, all using a fake chat model (no API key needed)
+  trace_explorer.py    # Streamlit: span-by-span trace view + cost/performance analytics
+  replay.py            # Streamlit: step through a past run's checkpoints, fork, compare
+tests/             # unit + integration + end-to-end tests, all using a fake chat model (no API key needed)
+demo.py            # showcase scenario: memory -> escalation -> parallel specialists -> redo -> delivery
+Dockerfile, docker-compose.yml  # containerized deployment (see Phase 5 below)
 ```
 
 Run it locally:
@@ -59,10 +70,12 @@ cp .env.example .env   # fill in OPENAI_API_KEY / ANTHROPIC_API_KEY
 pytest -q
 python -m agent_orchestrator.run "Research topic X and write a two-paragraph summary" --user-id alice
 
-# memory dashboard + approval-queue API
+# memory + approval-queue + trace/cost + replay API
 uvicorn agent_orchestrator.api:app --reload
 streamlit run ui/memory_dashboard.py
 streamlit run ui/review_queue.py
+streamlit run ui/trace_explorer.py
+streamlit run ui/replay.py
 ```
 
 Notes:
@@ -108,6 +121,75 @@ their own output). `reject` always stops the task; `take_over` either
 supplies that one stuck subtask's output (execution continues) or the whole
 task's final output (execution ends), depending on where the escalation fired.
 
+### How observability works
+
+Every graph node appends one entry to `state["trace_events"]` (node, agent,
+status, start/end time, token usage, node-specific attributes like the plan's
+confidence or a specialist's tool calls) -- a plain accumulating list, not a
+side channel, so it survives interrupt/resume for free. `run_traced_task`
+(the instrumented counterpart of `run_task`) reads the new entries after each
+`invoke` and, for each one: computes cost from `settings.model_pricing`,
+writes a row to `TraceStore` (SQLite: `tasks` + `spans` tables, plus one span
+per individual tool call), and emits a real OpenTelemetry span with the same
+attributes -- so this plugs into Jaeger/Honeycomb/etc. via
+`OTEL_EXPORTER_OTLP_ENDPOINT` without code changes, while the trace explorer
+and cost dashboards (`ui/trace_explorer.py`) are powered by `TraceStore`
+directly, since "cost per task type" and "most expensive agent" aren't things
+a span exporter aggregates for you without a metrics backend of its own.
+
+`task_type` (used for cost grouping) is a coarse heuristic -- the sorted set
+of specialists a plan uses (e.g. `"research+writing"`) -- not a real
+classifier; treat it as a grouping key, not a precise label. Similarly,
+`settings.model_pricing`'s bundled rates are round, illustrative placeholders,
+not verified current vendor pricing -- override them (see `.env.example`)
+before trusting a cost figure.
+
+**Replay** (`ui/replay.py`, `tracing/replay.py`) uses LangGraph's own
+checkpoint history rather than a custom re-run mechanism: `get_state_history`
+lists every checkpoint a task passed through, `update_state` on a specific one
+forks a new branch from that exact point with a modified value, and `invoke`
+resumes it -- only the downstream nodes re-run, so the original run's
+checkpoints (and its final state) stay intact for side-by-side comparison.
+This only works against a *persistent* checkpointer, which is why the CLI
+(`run.build_app`) points the graph at a real one -- SQLite (`settings.checkpoint_db_path`)
+locally, or Postgres (`settings.postgres_url`) under docker-compose -- instead
+of the fast in-memory default `build_graph()` falls back to for tests.
+
+## Containerized deployment
+
+```
+cp .env.example .env   # fill in OPENAI_API_KEY / ANTHROPIC_API_KEY
+docker compose up -d --build
+docker compose --profile demo run --rm demo   # runs the showcase scenario
+```
+
+This brings up seven services: `redis` (working memory + approval queue),
+`postgres` (checkpoint persistence, so a paused/resumed task and replay
+history survive any single container restarting), `chroma` (long-term
+memory, as a real server this time instead of a local directory), `api`
+(the FastAPI app from `api.py`), `worker` (a Celery worker executing
+specialist tool-calling loops), and four Streamlit UIs -- `trace-ui`
+(:8501), `review-ui` (:8502), `memory-ui` (:8503), `replay-ui` (:8504).
+`api` is on :8080.
+
+All seven app-facing services (`api`, `worker`, the four UIs, `demo`) are
+built from the same image (one `Dockerfile`, `command:` overridden per
+service) and share an `app_data` volume so `TRACE_DB_PATH`, tool-sandbox
+files, and anything else written to `/data` are visible across all of them
+-- e.g. a task the CLI or `demo` runs shows up in `trace-ui` immediately.
+
+`USE_CELERY_FOR_SPECIALISTS=true` in the compose environment is what routes
+each specialist's tool-calling loop through the `worker` service instead of
+running in-process -- the graph itself doesn't change; `graph/build.py`'s
+`run_specialist` node just calls `run_specialist_task.delay(...).get(...)`
+instead of the specialist directly when this is set (see `tasks.py`). Turn
+it off (or just run `python -m agent_orchestrator.run` locally, where it
+defaults to `false`) to execute specialists in-process instead.
+
+Running only the CLI/tests doesn't need any of this -- `docker compose` is
+for the "production-shaped" full stack; `pip install -e ".[dev]"` and a local
+`.env` are all `pytest` or `python -m agent_orchestrator.run` need.
+
 ## Build Progress
 
 Tracking checklist for the build guide below. Check items off as they're completed.
@@ -131,15 +213,15 @@ Tracking checklist for the build guide below. Check items off as they're complet
 - [x] Build the review interface (task context, decision point, proposed action + reasoning, relevant memories, action buttons, clarifying-question chat)
 
 ### Phase 4: Observability and Debugging (Day 10–12)
-- [ ] Implement full execution tracing (OpenTelemetry spans for planning, tool calls, review, memory retrieval, escalation)
-- [ ] Build the trace explorer UI (tree/graph view, per-node agent/decision/tools/latency/cost/errors, color-coded status, expandable prompt/response)
-- [ ] Add cost and performance tracking (tokens by agent/model, tool calls, wall-clock time, human review time, cost aggregation)
-- [ ] Build the replay system (reload past executions, step through decisions, modify inputs, diff against original)
+- [x] Implement full execution tracing (OpenTelemetry spans for planning, tool calls, review, memory retrieval, escalation)
+- [x] Build the trace explorer UI (tree/graph view, per-node agent/decision/tools/latency/cost/errors, color-coded status, expandable prompt/response)
+- [x] Add cost and performance tracking (tokens by agent/model, tool calls, wall-clock time, human review time, cost aggregation)
+- [x] Build the replay system (reload past executions, step through decisions, modify inputs, diff against original)
 
 ### Phase 5: Integration and End-to-End Testing (Day 12–13)
-- [ ] Build a compelling demo scenario (research task: web search → data extraction → analysis → written summary)
-- [ ] Containerize the full system (docker-compose: API, Redis, PostgreSQL, ChromaDB, Celery workers, trace UI, review UI + demo script)
-- [ ] Write end-to-end tests (decomposition validity, specialist tool use, reviewer catching bad output, memory improving repeat planning, escalation triggers, failure recovery)
+- [x] Build a compelling demo scenario (research task: web search → data extraction → analysis → written summary)
+- [x] Containerize the full system (docker-compose: API, Redis, PostgreSQL, ChromaDB, Celery workers, trace UI, review UI + demo script)
+- [x] Write end-to-end tests (decomposition validity, specialist tool use, reviewer catching bad output, memory improving repeat planning, escalation triggers, failure recovery)
 
 ### Phase 6: Polish for Portfolio (Day 13–14)
 - [ ] Record the demo (< 5 minutes, full task lifecycle)
