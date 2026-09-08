@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
+    groq_api_key: str | None = None  # for model names prefixed "groq:", e.g. "groq:openai/gpt-oss-120b"
 
     # Model routing: which model each agent role uses by default.
     supervisor_model: str = "claude-sonnet-5"

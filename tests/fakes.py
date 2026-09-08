@@ -46,7 +46,7 @@ class FakeChatModel:
     def bind_tools(self, _tools):
         return self
 
-    def with_structured_output(self, _schema, include_raw: bool = False):
+    def with_structured_output(self, _schema, include_raw: bool = False, **_kwargs):
         return _StructuredWrapper(self.structured_response, self.usage)
 
     def invoke(self, _messages):

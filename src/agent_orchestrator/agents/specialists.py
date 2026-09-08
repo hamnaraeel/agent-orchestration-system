@@ -142,9 +142,9 @@ class SpecialistAgent(BaseAgent):
                     f"Exceeded {_MAX_TOOL_ITERATIONS} tool-calling iterations without a final answer."
                 )
 
-            final = self.llm.with_structured_output(SpecialistOutput, include_raw=True).invoke(
-                messages
-            )
+            final = self.llm.with_structured_output(
+                SpecialistOutput, include_raw=True, method="json_schema"
+            ).invoke(messages)
             self._record_usage(final["raw"])
             _accumulate()
             self.last_usage = total_usage

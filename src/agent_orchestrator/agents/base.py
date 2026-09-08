@@ -12,20 +12,33 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from ..config import settings
 from ..schemas import TokenUsage
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 
 def get_llm(model_name: str, temperature: float = 0.0) -> BaseChatModel:
+    # pydantic-settings loads .env into `settings` only -- it does not export
+    # those values into os.environ, which is what each provider's client
+    # falls back to reading on its own. Pass the key explicitly whenever
+    # settings actually has one; otherwise omit it so a key exported directly
+    # in the shell (bypassing .env) still works via the client's own fallback.
     if model_name.startswith("claude"):
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(model=model_name, temperature=temperature)
+        kwargs = {"api_key": settings.anthropic_api_key} if settings.anthropic_api_key else {}
+        return ChatAnthropic(model=model_name, temperature=temperature, **kwargs)
     if model_name.startswith(("gpt", "o1", "o3", "o4")):
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(model=model_name, temperature=temperature)
+        kwargs = {"api_key": settings.openai_api_key} if settings.openai_api_key else {}
+        return ChatOpenAI(model=model_name, temperature=temperature, **kwargs)
+    if model_name.startswith("groq:"):
+        from langchain_groq import ChatGroq
+
+        kwargs = {"api_key": settings.groq_api_key} if settings.groq_api_key else {}
+        return ChatGroq(model=model_name.removeprefix("groq:"), temperature=temperature, **kwargs)
     raise ValueError(f"Don't know which provider serves model '{model_name}'.")
 
 
@@ -69,7 +82,16 @@ class BaseAgent:
 
     def structured(self, user_prompt: str, schema: type[SchemaT]) -> SchemaT:
         self.last_prompt = user_prompt
-        structured_llm = self.llm.with_structured_output(schema, include_raw=True)
+        # "json_schema" (not the default "function_calling") is what's
+        # portable across all three providers we route to: Anthropic doesn't
+        # support "json_mode", and forcing tool_choice ("function_calling")
+        # is unreliable on at least some Groq-hosted models -- confirmed by a
+        # real run against groq:openai/gpt-oss-20b/120b, which rejected the
+        # forced tool call with "Tool choice is required, but model did not
+        # call a tool" even though the model answered correctly in prose.
+        structured_llm = self.llm.with_structured_output(
+            schema, include_raw=True, method="json_schema"
+        )
         result = structured_llm.invoke(
             [SystemMessage(content=self.system_prompt), HumanMessage(content=user_prompt)]
         )

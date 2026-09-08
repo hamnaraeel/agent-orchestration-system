@@ -114,8 +114,8 @@ def test_full_pipeline_memory_escalation_parallel_tools_and_redo(tmp_path):
     )
     original_with_structured_output = supervisor_llm.with_structured_output
 
-    def spying_with_structured_output(schema, include_raw: bool = False):
-        wrapper = original_with_structured_output(schema, include_raw=include_raw)
+    def spying_with_structured_output(schema, include_raw: bool = False, **kwargs):
+        wrapper = original_with_structured_output(schema, include_raw=include_raw, **kwargs)
         original_invoke = wrapper.invoke
 
         def spying_invoke(messages):

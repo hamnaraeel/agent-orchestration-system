@@ -38,13 +38,15 @@ def _auto_approve_watcher(approval_queue, stop_event: threading.Event) -> None:
     every pending escalation, prints it (what a real reviewer would read) and
     approves it. This still exercises the real approval-queue round trip --
     submit, a separate 'reviewer', resolve, resume -- just without an actual
-    person clicking a button."""
-    seen: set[str] = set()
+    person clicking a button.
+
+    No "already handled" set here on purpose: `list_pending()` only ever
+    returns entries that are *currently* pending, so once we resolve one it
+    naturally stops appearing -- and a task can escalate more than once (e.g.
+    a low-confidence plan, then later a stuck specialist), each time with a
+    fresh pending entry under the same task_id that must be caught again."""
     while not stop_event.is_set():
         for approval in approval_queue.list_pending():
-            if approval.task_id in seen:
-                continue
-            seen.add(approval.task_id)
             _banner("HUMAN REVIEW REQUIRED (auto-approving for this unattended demo)")
             print(f"Level:  {approval.escalation.level.value}")
             print(f"Reason: {approval.escalation.reason}")
