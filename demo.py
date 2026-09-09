@@ -47,12 +47,22 @@ def _auto_approve_watcher(approval_queue, stop_event: threading.Event) -> None:
     fresh pending entry under the same task_id that must be caught again."""
     while not stop_event.is_set():
         for approval in approval_queue.list_pending():
-            _banner("HUMAN REVIEW REQUIRED (auto-approving for this unattended demo)")
+            _banner("HUMAN REVIEW REQUIRED (auto-deciding for this unattended demo)")
             print(f"Level:  {approval.escalation.level.value}")
             print(f"Reason: {approval.escalation.reason}")
             print("(In production, a human reviews the full packaged context")
-            print(" here -- see ui/review_queue.py -- before deciding.)")
-            approval_queue.resolve(approval.task_id, HumanDecision(action=DecisionAction.APPROVE))
+            print(" here -- see ui/app.py's Review Queue page -- before deciding.)")
+            if approval.source == "specialist_retry":
+                # Blindly re-approving a stuck specialist just retries the
+                # exact same failing call -- a real reviewer would step in
+                # rather than click "approve" forever, so this does too.
+                decision = HumanDecision(
+                    action=DecisionAction.TAKE_OVER,
+                    output="[Provided by a human reviewer standing in for the stuck specialist.]",
+                )
+            else:
+                decision = HumanDecision(action=DecisionAction.APPROVE)
+            approval_queue.resolve(approval.task_id, decision)
         time.sleep(0.3)
 
 
@@ -99,8 +109,8 @@ def main() -> None:
             user_id="demo-investor",
         )
         print(
-            "\n(Open ui/trace_explorer.py and check this task's plan_task span -- "
-            "its prompt includes the memory retrieved from step 1.)"
+            "\n(Open ui/app.py's Trace Explorer page and check this task's plan_task "
+            "span -- its prompt includes the memory retrieved from step 1.)"
         )
 
         _banner("STEP 3 -- a sensitive-sounding request: human approval required first")
@@ -121,10 +131,11 @@ def main() -> None:
     _banner("DONE")
     print(f"{len(trace_store.list_tasks())} task(s) recorded this run.")
     print("Explore what happened:")
-    print("  streamlit run ui/trace_explorer.py   # spans, cost, latency, prompts/responses")
-    print("  streamlit run ui/review_queue.py     # the escalations that were resolved")
-    print("  streamlit run ui/memory_dashboard.py # what step 1 taught step 2's planning")
-    print("  streamlit run ui/replay.py           # time-travel through any of these runs")
+    print("  streamlit run ui/app.py")
+    print("    -> Trace Explorer: spans, cost, latency, prompts/responses")
+    print("    -> Review Queue: the escalations that were resolved")
+    print("    -> Memory Dashboard: what step 1 taught step 2's planning")
+    print("    -> Replay Debugger: time-travel through any of these runs")
 
 
 if __name__ == "__main__":

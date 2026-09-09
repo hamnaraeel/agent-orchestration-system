@@ -2,8 +2,6 @@
 color-coded spans (agent, decision, tools called, latency, cost, errors),
 expand any span for its full context (LLM prompt/response included), and
 browse cost/performance analytics across every task that's been run.
-
-Run with: streamlit run ui/trace_explorer.py
 """
 from datetime import datetime, timezone
 
@@ -12,15 +10,21 @@ import streamlit as st
 from agent_orchestrator.config import settings
 from agent_orchestrator.tracing.store import TraceStore
 
-st.set_page_config(page_title="Trace Explorer", layout="wide")
 st.title("Trace Explorer")
 
-STATUS_COLOR = {
-    "success": "🟢",
-    "warning": "🟡",
-    "failure": "🔴",
-    "escalated": "🟠",
+# Material Symbols (Streamlit's built-in icon set) -- bare names here; each
+# use site adds the ":material/" wrapper the widget it's passed to expects.
+STATUS_ICON = {
+    "success": "check_circle",
+    "warning": "warning",
+    "failure": "cancel",
+    "escalated": "priority_high",
 }
+_DEFAULT_ICON = "help"
+
+
+def _material(status: str) -> str:
+    return f":material/{STATUS_ICON.get(status, _DEFAULT_ICON)}:"
 
 
 @st.cache_resource
@@ -47,7 +51,7 @@ with tab_traces:
         st.stop()
 
     labels = [
-        f"{STATUS_COLOR.get(t.status, '⚪')} {_fmt_time(t.started_at)} · {t.task_text[:60]} "
+        f"[{t.status}] {_fmt_time(t.started_at)} · {t.task_text[:60]} "
         f"(${t.total_cost_usd:.4f})"
         for t in tasks
     ]
@@ -55,7 +59,7 @@ with tab_traces:
     task = tasks[choice]
 
     col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Status", task.status)
+    col1.metric("Status", task.status, icon=_material(task.status))
     col2.metric("Wall clock", f"{(task.wall_clock_ms or 0) / 1000:.2f}s")
     col3.metric("Tokens", f"{task.total_input_tokens + task.total_output_tokens:,}")
     col4.metric("Cost", f"${task.total_cost_usd:.4f}")
@@ -72,13 +76,10 @@ with tab_traces:
     st.subheader("Spans")
     spans = store.get_spans(task.task_id)
     for span in spans:
-        icon = STATUS_COLOR.get(span.status, "⚪")
-        header = (
-            f"{icon} `{span.node_name}` — {span.agent} — {span.latency_ms:.0f}ms"
-        )
+        header = f"`{span.node_name}` — {span.agent} — {span.latency_ms:.0f}ms"
         if span.input_tokens or span.output_tokens:
             header += f" — {span.input_tokens + span.output_tokens} tok — ${span.cost_usd:.5f}"
-        with st.expander(header):
+        with st.expander(header, icon=_material(span.status)):
             attrs = span.attributes
             if attrs.get("prompt"):
                 st.markdown("**Prompt:**")

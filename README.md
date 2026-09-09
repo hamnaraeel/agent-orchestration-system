@@ -52,10 +52,12 @@ src/agent_orchestrator/
   run.py           # CLI entry point + `run_task`/`run_traced_task`: bridges interrupts to the queue
   tasks.py         # Celery task: reconstructs + runs one specialist in a worker process
 ui/
-  memory_dashboard.py  # Streamlit page over long-term memory (per-user view + delete)
-  review_queue.py      # Streamlit review interface: context, clarifying-question chat, decide
-  trace_explorer.py    # Streamlit: span-by-span trace view + cost/performance analytics
-  replay.py            # Streamlit: step through a past run's checkpoints, fork, compare
+  app.py               # single Streamlit entry point (one process, one port); sidebar navigation
+  pages/
+    trace_explorer.py    # span-by-span trace view + cost/performance analytics
+    review_queue.py      # pending escalations: context, clarifying-question chat, decide
+    memory_dashboard.py  # long-term memory (per-user view + delete)
+    replay.py            # step through a past run's checkpoints, fork, compare
 tests/             # unit + integration + end-to-end tests, all using a fake chat model (no API key needed)
 demo.py            # showcase scenario: memory -> escalation -> parallel specialists -> redo -> delivery
 Dockerfile, docker-compose.yml  # containerized deployment (see Phase 5 below)
@@ -72,10 +74,7 @@ python -m agent_orchestrator.run "Research topic X and write a two-paragraph sum
 
 # memory + approval-queue + trace/cost + replay API
 uvicorn agent_orchestrator.api:app --reload
-streamlit run ui/memory_dashboard.py
-streamlit run ui/review_queue.py
-streamlit run ui/trace_explorer.py
-streamlit run ui/replay.py
+streamlit run ui/app.py   # trace explorer, review queue, memory dashboard, replay -- one app, sidebar nav
 ```
 
 Notes:
@@ -133,7 +132,7 @@ writes a row to `TraceStore` (SQLite: `tasks` + `spans` tables, plus one span
 per individual tool call), and emits a real OpenTelemetry span with the same
 attributes -- so this plugs into Jaeger/Honeycomb/etc. via
 `OTEL_EXPORTER_OTLP_ENDPOINT` without code changes, while the trace explorer
-and cost dashboards (`ui/trace_explorer.py`) are powered by `TraceStore`
+and cost dashboards (`ui/pages/trace_explorer.py`) are powered by `TraceStore`
 directly, since "cost per task type" and "most expensive agent" aren't things
 a span exporter aggregates for you without a metrics backend of its own.
 
@@ -144,7 +143,7 @@ classifier; treat it as a grouping key, not a precise label. Similarly,
 not verified current vendor pricing -- override them (see `.env.example`)
 before trusting a cost figure.
 
-**Replay** (`ui/replay.py`, `tracing/replay.py`) uses LangGraph's own
+**Replay** (`ui/pages/replay.py`, `tracing/replay.py`) uses LangGraph's own
 checkpoint history rather than a custom re-run mechanism: `get_state_history`
 lists every checkpoint a task passed through, `update_state` on a specific one
 forks a new branch from that exact point with a modified value, and `invoke`
@@ -163,20 +162,20 @@ docker compose up -d --build
 docker compose --profile demo run --rm demo   # runs the showcase scenario
 ```
 
-This brings up seven services: `redis` (working memory + approval queue),
+This brings up four services: `redis` (working memory + approval queue),
 `postgres` (checkpoint persistence, so a paused/resumed task and replay
 history survive any single container restarting), `chroma` (long-term
 memory, as a real server this time instead of a local directory), `api`
-(the FastAPI app from `api.py`), `worker` (a Celery worker executing
-specialist tool-calling loops), and four Streamlit UIs -- `trace-ui`
-(:8501), `review-ui` (:8502), `memory-ui` (:8503), `replay-ui` (:8504).
-`api` is on :8080.
+(the FastAPI app from `api.py`, on :8080), `worker` (a Celery worker
+executing specialist tool-calling loops), and `ui` (the Streamlit app from
+`ui/app.py` -- trace explorer, review queue, memory dashboard, and replay,
+as sidebar pages of one app, on :8501).
 
-All seven app-facing services (`api`, `worker`, the four UIs, `demo`) are
-built from the same image (one `Dockerfile`, `command:` overridden per
-service) and share an `app_data` volume so `TRACE_DB_PATH`, tool-sandbox
-files, and anything else written to `/data` are visible across all of them
--- e.g. a task the CLI or `demo` runs shows up in `trace-ui` immediately.
+All of `api`, `worker`, `ui`, and `demo` are built from the same image (one
+`Dockerfile`, `command:` overridden per service) and share an `app_data`
+volume so `TRACE_DB_PATH`, tool-sandbox files, and anything else written to
+`/data` are visible across all of them -- e.g. a task the CLI or `demo` runs
+shows up in the trace explorer immediately.
 
 `USE_CELERY_FOR_SPECIALISTS=true` in the compose environment is what routes
 each specialist's tool-calling loop through the `worker` service instead of

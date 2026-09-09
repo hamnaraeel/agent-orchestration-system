@@ -4,14 +4,14 @@ trace (spans, tokens, cost) to `settings.trace_db_path`.
 
 When an escalation queue is available (Redis reachable), a paused run is
 pushed there and this process blocks on `ApprovalQueue.wait_for_decision` --
-so resolving it from a *separate* process (the review API/UI, or
-`ui/review_queue.py`) is exactly what unblocks this one. Without a queue
+so resolving it from a *separate* process (the review API, or `ui/app.py`'s
+Review Queue page) is exactly what unblocks this one. Without a queue
 (`--no-memory`), the decision is instead prompted for right here on the
 terminal, which is the fastest way to exercise escalation locally.
 
 The graph is checkpointed to `settings.checkpoint_db_path` (not just kept in
 memory), so a task's full history survives this process exiting -- which is
-what makes `ui/replay.py`'s time-travel debugging possible against a run made
+what makes `ui/app.py`'s Replay Debugger page possible against a run made
 from a previous CLI invocation.
 """
 from __future__ import annotations

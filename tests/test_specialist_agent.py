@@ -126,3 +126,40 @@ def test_specialist_accumulates_token_usage_across_the_tool_loop(tmp_path, monke
     # two tool-loop turns + the final structured call = 3 calls, each (10, 5)
     assert agent.last_usage.input_tokens == 30
     assert agent.last_usage.output_tokens == 15
+
+
+def test_specialist_degrades_gracefully_when_tool_iterations_are_exhausted(tmp_path, monkeypatch):
+    """If the model keeps calling tools without ever settling on an answer,
+    the specialist should force one final tools-off turn and salvage that as
+    its answer, rather than failing the whole subtask outright."""
+    monkeypatch.setattr(config.settings, "sandbox_workdir", str(tmp_path))
+
+    registry = ToolRegistry()
+    register_builtin_tools(registry)
+
+    always_calls_a_tool = AIMessage(
+        content="",
+        tool_calls=[{"name": "file_read", "args": {"path": "missing.txt"}, "id": "c1"}],
+    )
+    fake_llm = FakeChatModel(
+        structured_response=SpecialistOutput(
+            output="Best-effort answer from general knowledge.", confidence=0.4
+        ),
+        tool_call_turns=[always_calls_a_tool] * 4,  # exhausts _MAX_TOOL_ITERATIONS
+        plain_response="Best-effort answer from general knowledge.",
+    )
+
+    agent = SpecialistAgent(SpecialistType.RESEARCH, "gpt-5", registry, llm=fake_llm)
+    subtask = SubTask(
+        id="st-1",
+        description="Find a fact that isn't available locally",
+        specialist=SpecialistType.RESEARCH,
+        expected_output_format="text",
+        estimated_complexity=1,
+    )
+
+    result = agent.run(subtask, context={})
+
+    assert result.success is True
+    assert result.output == "Best-effort answer from general knowledge."
+    assert len(result.tool_calls) == 4  # all four attempts still logged

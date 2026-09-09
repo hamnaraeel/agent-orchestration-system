@@ -6,8 +6,6 @@ resolve with approve / reject / modify / take over.
 Resolving here only writes to the approval queue -- it's whichever process is
 blocked in `ApprovalQueue.wait_for_decision` (the CLI's `run_task`, or a
 future worker) that actually resumes the paused graph.
-
-Run with: streamlit run ui/review_queue.py
 """
 import streamlit as st
 
@@ -16,7 +14,6 @@ from agent_orchestrator.config import settings
 from agent_orchestrator.human_loop.approval_queue import ApprovalQueue
 from agent_orchestrator.schemas import DecisionAction, HumanDecision
 
-st.set_page_config(page_title="Human Review Queue", layout="wide")
 st.title("Human Review Queue")
 
 

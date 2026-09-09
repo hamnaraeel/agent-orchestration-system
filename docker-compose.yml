@@ -62,25 +62,10 @@ services:
     <<: *app-image
     command: celery -A agent_orchestrator.tasks worker --loglevel=info
 
-  trace-ui:
+  ui:
     <<: *app-image
-    command: streamlit run ui/trace_explorer.py --server.address 0.0.0.0 --server.port 8501
+    command: streamlit run ui/app.py --server.address 0.0.0.0 --server.port 8501
     ports: ["8501:8501"]
-
-  review-ui:
-    <<: *app-image
-    command: streamlit run ui/review_queue.py --server.address 0.0.0.0 --server.port 8502
-    ports: ["8502:8502"]
-
-  memory-ui:
-    <<: *app-image
-    command: streamlit run ui/memory_dashboard.py --server.address 0.0.0.0 --server.port 8503
-    ports: ["8503:8503"]
-
-  replay-ui:
-    <<: *app-image
-    command: streamlit run ui/replay.py --server.address 0.0.0.0 --server.port 8504
-    ports: ["8504:8504"]
 
   demo:
     <<: *app-image

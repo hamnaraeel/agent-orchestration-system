@@ -18,14 +18,25 @@ from ..schemas import (
 from ..tools.registry import ToolRegistry
 from .base import BaseAgent, get_llm
 
+_DEGRADE_GRACEFULLY = (
+    " Only call a tool if you have a concrete reason to think it will return "
+    "something useful -- don't call file/database tools speculatively hoping "
+    "data happens to exist there. If a tool doesn't have what you need after "
+    "one or two tries, stop searching and answer from your own knowledge "
+    "instead, clearly noting where you're estimating or uncertain rather "
+    "than leaving the subtask unanswered."
+)
+
 _SYSTEM_PROMPTS: dict[SpecialistType, str] = {
     SpecialistType.RESEARCH: (
         "You are the Research specialist. Use the tools available to you to "
         "gather facts needed for the subtask, then summarize what you found."
+        + _DEGRADE_GRACEFULLY
     ),
     SpecialistType.DATA_ANALYSIS: (
         "You are the Data Analysis specialist. Use the tools available to you "
         "to query, compute, or transform data, then report your findings."
+        + _DEGRADE_GRACEFULLY
     ),
     SpecialistType.WRITING: (
         "You are the Writing specialist. Produce clear, well-structured prose "
@@ -34,6 +45,7 @@ _SYSTEM_PROMPTS: dict[SpecialistType, str] = {
     SpecialistType.CODE_EXECUTION: (
         "You are the Code Execution specialist. Write and run code to satisfy "
         "the subtask, then report the result."
+        + _DEGRADE_GRACEFULLY
     ),
 }
 
@@ -128,19 +140,38 @@ class SpecialistAgent(BaseAgent):
                     break
                 for call in ai_message.tool_calls:
                     before = len(self.tool_registry.call_log)
-                    tool = next(t for t in self._lc_tools if t.name == call["name"])
-                    try:
-                        result = tool.invoke(call["args"])
-                    except Exception as exc:  # noqa: BLE001
-                        result = f"ERROR: {exc}"
-                    tool_calls_made.extend(self.tool_registry.call_log[before:])
+                    tool = next((t for t in self._lc_tools if t.name == call["name"]), None)
+                    if tool is None:
+                        # A hallucinated tool name: feed the error back like any
+                        # other tool failure so the model can self-correct
+                        # within the loop, instead of aborting the whole attempt.
+                        result = f"ERROR: no such tool '{call['name']}'."
+                    else:
+                        try:
+                            result = tool.invoke(call["args"])
+                        except Exception as exc:  # noqa: BLE001
+                            result = f"ERROR: {exc}"
+                        tool_calls_made.extend(self.tool_registry.call_log[before:])
                     messages.append(
                         ToolMessage(content=str(result), tool_call_id=call["id"])
                     )
             else:
-                raise RuntimeError(
-                    f"Exceeded {_MAX_TOOL_ITERATIONS} tool-calling iterations without a final answer."
+                # Ran out of tool-calling iterations without the model settling
+                # on a final answer. Rather than failing the subtask outright,
+                # give it one last forced turn with tools removed so it must
+                # answer directly from whatever it has gathered so far.
+                messages.append(
+                    HumanMessage(
+                        content="You must answer now, using only what you've already "
+                        "gathered above -- no more tool calls are available. If you "
+                        "couldn't find the specific information requested, give your "
+                        "best answer from general knowledge and say so plainly."
+                    )
                 )
+                ai_message = self.llm.invoke(messages)
+                self._record_usage(ai_message)
+                _accumulate()
+                messages.append(ai_message)
 
             final = self.llm.with_structured_output(
                 SpecialistOutput, include_raw=True, method="json_schema"

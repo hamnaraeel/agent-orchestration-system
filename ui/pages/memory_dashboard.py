@@ -1,14 +1,11 @@
 """Memory dashboard: what the system remembers about a given user, with
 maintenance actions (consolidate, expire) and a per-user/per-memory delete for
 data-deletion requests.
-
-Run with: streamlit run ui/memory_dashboard.py
 """
 import streamlit as st
 
 from agent_orchestrator.memory.long_term import LongTermMemory
 
-st.set_page_config(page_title="Memory Dashboard", layout="wide")
 st.title("Memory Dashboard")
 
 memory = LongTermMemory()

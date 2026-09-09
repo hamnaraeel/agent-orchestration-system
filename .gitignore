@@ -18,6 +18,8 @@ build/
 
 # Data / state
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 chroma_data/
 postgres_data/

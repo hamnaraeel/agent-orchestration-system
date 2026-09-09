@@ -5,8 +5,6 @@ replayed outcome against the original.
 Needs a task run through the CLI first (which checkpoints to
 `settings.checkpoint_db_path`, not just in memory) -- copy its `task_id` from
 the CLI's output or the trace explorer.
-
-Run with: streamlit run ui/replay.py
 """
 import json
 
@@ -15,7 +13,6 @@ import streamlit as st
 from agent_orchestrator.run import build_app
 from agent_orchestrator.tracing.replay import list_checkpoints, replay_from_checkpoint
 
-st.set_page_config(page_title="Replay Debugger", layout="wide")
 st.title("Replay Debugger")
 
 
