@@ -1,8 +1,25 @@
 # Agent Orchestration System
 
+![Trace Explorer — a real completed task, its cost/latency/token metrics, and its span-by-span execution](docs/trace-explorer.png)
+
 A multi-agent orchestration platform where a supervisor agent decomposes complex tasks, delegates subtasks to specialized tool-using agents, maintains persistent memory across interactions, and escalates to a human operator when confidence is low or the task requires approval — with full observability into every agent decision.
 
 > It's not an AI demo — it's production infrastructure for autonomous AI workflows.
+
+## What This Is
+
+This is infrastructure for running complex, multi-step tasks through AI agents safely and observably — not a chatbot, but a pipeline you'd put behind an API or a job queue. Give it a task in plain language ("research X, extract the figures, write a summary"), and it handles breaking that down, doing the work with real tools, checking its own output, remembering what worked for next time, and pulling in a human when it isn't confident enough to proceed alone — all while recording exactly what happened so the run can be audited, debugged, or improved later.
+
+**How a task flows through it:**
+
+1. **Supervisor** reads the task, checks its memory of similar past tasks, and decomposes it into subtasks, assigning each to a specialist.
+2. **Specialists** (research, data analysis, writing, code execution) run — in parallel when subtasks don't depend on each other — each with its own tool-calling loop (web search, file/DB access, code execution) and a hard limit on retries.
+3. **Reviewer** checks the combined output; if it's not good enough, specific feedback goes back to the specialist for a redo, rather than failing the whole task.
+4. **Escalation**: a low-confidence plan, anything sensitive (money, deletion, external comms), or a specialist that keeps failing pauses the task and waits for a human decision — approve, reject, modify, or take over. A real pause (via LangGraph's checkpointing), not a timeout — it resumes even after a restart.
+5. **Memory**: once a task finishes, it extracts what it learned (facts, what approach worked, user preferences) into long-term memory, so a similar task later starts smarter.
+6. Every step is recorded as a trace — agent, decision, tools called, latency, cost, and the actual LLM prompt/response — browsable in the Trace Explorer shown above.
+
+The Streamlit app (`ui/app.py`) is the window into all of this: Trace Explorer for what happened, Review Queue for pending human decisions, Memory Dashboard for what the system has learned, and a Replay Debugger for stepping through and forking a past run. See [Containerized deployment](#containerized-deployment) below for running the whole stack, or `python -m agent_orchestrator.run "..."` for a quick one-off.
 
 ## Tech Stack
 

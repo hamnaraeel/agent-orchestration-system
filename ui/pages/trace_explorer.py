@@ -14,11 +14,16 @@ st.title("Trace Explorer")
 
 # Material Symbols (Streamlit's built-in icon set) -- bare names here; each
 # use site adds the ":material/" wrapper the widget it's passed to expects.
+# Covers both span-level statuses (success/warning/failure/escalated) and
+# task-level ones (running/completed/rejected).
 STATUS_ICON = {
     "success": "check_circle",
+    "completed": "check_circle",
     "warning": "warning",
     "failure": "cancel",
+    "rejected": "cancel",
     "escalated": "priority_high",
+    "running": "sync",
 }
 _DEFAULT_ICON = "help"
 
